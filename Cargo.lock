@@ -6,6 +6,7 @@ version = 4
 name = "EasyQ"
 version = "0.1.0"
 dependencies = [
+ "apodize",
  "cpal",
  "eframe",
  "egui",
@@ -206,6 +207,12 @@ checksum = "819e7219dbd41043ac279b19830f2efc897156490d7fd6ea916720117ee66311"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "apodize"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fca387cdc0a1f9c7a7c26556d584aa2d07fc529843082e4861003cde4ab914ed"
 
 [[package]]
 name = "arboard"

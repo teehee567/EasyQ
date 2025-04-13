@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+apodize = "1.0.0"
 cpal = "0.15.3"
 eframe = "0.31.1"
 egui = "0.31.1"
