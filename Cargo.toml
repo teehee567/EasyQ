@@ -1,0 +1,11 @@
+[package]
+name = "EasyQ"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cpal = "0.15.3"
+eframe = "0.31.1"
+egui = "0.31.1"
+ringbuf = "0.4.8"
+rustfft = "6.2.0"
