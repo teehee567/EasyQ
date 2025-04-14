@@ -120,7 +120,7 @@ pub fn draw_spectrum(
                             egui::pos2(x_pos - bar_width/2.0, graph_rect.bottom() - bar_height),
                             egui::pos2(x_pos + bar_width/2.0, graph_rect.bottom())
                         ),
-                        0.0, // No rounding
+                        0.0,
                         egui::Color32::from(bar_color)
                     );
                 }

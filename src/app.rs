@@ -224,7 +224,6 @@ fn process_input_audio(data: &[f32], buffer: Arc<Mutex<Vec<f32>>>) {
         }
 
 
-        // Keep your buffer size management
         let buffer_size = BUFFER_SIZE * CHANNELS * 4;
         if buffer.len() > buffer_size {
             let excess = buffer.len() - buffer_size;
@@ -239,7 +238,6 @@ fn update_spectrum_data(analyzer: &mut SpectrumAnalyzer, state: &mut AudioState)
 
     // Apply temporal smoothing
     for i in 0..SPECTRUM_POINTS {
-        // Smooth current data
         state.spectrum_data[i] =
             state.spectrum_data[i] * SPECTRUM_DECAY + spectrum[i] * (1.0 - SPECTRUM_DECAY);
 
@@ -267,9 +265,7 @@ fn process_output_audio(
         }
     }
 
-    // Get input buffer
     let input_samples = if let Ok(mut buffer_lock) = buffer.lock() {
-        // Take all samples from the buffer
         let mut samples = Vec::new();
         std::mem::swap(&mut samples, &mut buffer_lock);
         samples
@@ -277,44 +273,22 @@ fn process_output_audio(
         Vec::new()
     };
 
-
-// Print a message if the input buffer has any non-zero right channel samples
-if CHANNELS == 2 && !input_samples.is_empty() {
-    let mut right_channel_has_sound = false;
-    for i in (1..input_samples.len()).step_by(2) {
-        if input_samples[i].abs() > 0.01 {
-            right_channel_has_sound = true;
-            break;
-        }
-    }
-    
-    if right_channel_has_sound {
-        println!("Right channel input detected");
-    } else {
-        println!("No right channel input detected");
-    }
-}
-
     if CHANNELS == 2 {
-        // Stereo processing
         let output_frames = data.len() / 2;
         
         for frame in 0..output_frames {
             let left_out_idx = frame * 2;
             let right_out_idx = frame * 2 + 1;
             
-            // Get input samples - already should be in stereo format due to process_input_audio
             let (left_in, right_in) = if frame * 2 + 1 < input_samples.len() {
                 (input_samples[frame * 2], input_samples[frame * 2 + 1])
             } else {
                 (0.0, 0.0)
             };
             
-            // Process each channel
             let left_processed = apply_eq_processing(left_in, &audio_state_weak);
             let right_processed = apply_eq_processing(right_in, &audio_state_weak);
             
-            // Set output data
             if left_out_idx < data.len() {
                 data[left_out_idx] = left_processed;
             }
@@ -324,7 +298,6 @@ if CHANNELS == 2 && !input_samples.is_empty() {
             }
         }
     } else {
-        // Mono processing
         let output_frames = data.len();
         for i in 0..output_frames {
             let in_sample = if i < input_samples.len() { input_samples[i] } else { 0.0 };
@@ -393,7 +366,6 @@ impl App for SystemWideEQ {
                 });
 
                 ui.menu_button("Presets", |ui| {
-                    // Clone the preset names to avoid borrow issues
                     let preset_names: Vec<String> = {
                         let state = self.audio_state.lock().unwrap();
                         state.presets.keys().cloned().collect()
@@ -434,7 +406,6 @@ impl App for SystemWideEQ {
                     "Status: Stopped"
                 });
 
-                // Add tab buttons
                 ui.separator();
                 ui.selectable_value(&mut self.current_tab, Tab::Equalizer, "Equalizer");
                 ui.selectable_value(&mut self.current_tab, Tab::Effects, "Effects");

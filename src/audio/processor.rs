@@ -112,10 +112,10 @@ impl SpectrumAnalyzer {
             
             let avg_energy = if count > 0 { sum_energy / count as f32 } else { 0.0 };
             
-            // Convert to dB scale
+            // Convert to db scale
             let db = 20.0 * (avg_energy + 1e-10).log10();
             
-            // Normalize to 0-60 range with floor at -80dB
+            // Normalize to 0-60 range with floor at -80db
             spectrum[i] = (db + 80.0).max(0.0).min(60.0);
         }
         
@@ -130,12 +130,10 @@ impl SpectrumAnalyzer {
         let mut avg_spectrum = vec![0.0; SPECTRUM_POINTS];
         
         for i in 0..SPECTRUM_POINTS {
-            // Calculate weighted average, giving more weight to recent frames
             let mut sum = 0.0;
             let mut weight_sum = 0.0;
             
             for (idx, frame) in self.spectrum_history.iter().enumerate() {
-                // Weight increases with index (newer frames have higher weight)
                 let weight = (idx + 1) as f32;
                 sum += frame[i] * weight;
                 weight_sum += weight;
@@ -147,7 +145,6 @@ impl SpectrumAnalyzer {
         avg_spectrum
     }
     
-    // Helper method to get frequency for a specific bin (useful for debugging)
     pub fn get_frequency_for_bin(&self, bin: usize, sample_rate: u32) -> f32 {
         if bin < self.freq_bins.len() {
             let fft_bin = self.freq_bins[bin];

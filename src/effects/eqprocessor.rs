@@ -47,9 +47,9 @@ fn calculate_bandwidth(center_freq: f32, neighbor_freq: Option<f32>) -> f32 {
         Some(next_freq) => {
             // Calculate geometric mean between this frequency and the next
             let ratio = (next_freq / center_freq).sqrt();
-            (ratio - 1.0/ratio) / 1.4142 // Adjust the constant for desired overlap
+            (ratio - 1.0/ratio) / 1.4142
         },
-        None => 1.0 // Default Q for edges
+        None => 1.0
     }
 }
 
@@ -83,14 +83,12 @@ fn update_filters(&mut self) {
         
         // Skip processing for bands with effectively zero gain
         if gain_db.abs() < 0.01 {
-            // Add a pass-through filter that doesn't modify the signal
             self.filters.push(BiquadFilter::new(1.0, 0.0, 0.0, 0.0, 0.0));
             continue;
         }
         
         // For the highest frequency band (20kHz), use a high-shelf filter instead of peaking
         if i == FREQUENCIES.len() - 1 {
-            // Use high-shelf filter for the highest band
             let (b0, b1, b2, a1, a2) = high_shelf_coefficients(
                 self.sample_rate,
                 freq,
@@ -152,7 +150,6 @@ fn update_filters(&mut self) {
 }
 
 
-// Add this new function for high-shelf filter coefficient calculation
 fn high_shelf_coefficients(sample_rate: f32, frequency: f32, gain_db: f32) -> (f32, f32, f32, f32, f32) {
     // Convert gain from dB to linear amplitude
     let amp = 10.0f32.powf(gain_db / 20.0);
@@ -173,7 +170,6 @@ fn high_shelf_coefficients(sample_rate: f32, frequency: f32, gain_db: f32) -> (f
     (b0/a0, b1/a0, b2/a0, a1/a0, a2/a0)
 }
 
-// Also improve the peaking filter calculation for better stability
 fn peaking_eq_coefficients(sample_rate: f32, frequency: f32, q: f32, gain_db: f32) -> (f32, f32, f32, f32, f32) {
     // Convert gain from dB to linear amplitude
     let amp = 10.0f32.powf(gain_db / 40.0);

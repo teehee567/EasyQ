@@ -4,11 +4,10 @@ use crate::config::CHANNELS;
 pub struct DistortionEffect {
     enabled: bool,
     pub drive: f32,       // 1.0 to 100.0, amount of distortion
-    pub tone: f32,        // 0.0 to 1.0, tone control (low-pass filter)
+    pub tone: f32,        // 0.0 to 1.0, low pass filter
     pub mix: f32,         // 0.0 to 1.0, dry/wet mix
     pub output_gain: f32, // Output level compensation
     
-    // Simple one-pole low-pass filter
     filter_state_left: f32,
     filter_state_right: f32,
 }

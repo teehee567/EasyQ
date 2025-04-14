@@ -73,7 +73,6 @@ pub fn init_devices(host: &Host) -> (Vec<String>, usize, usize) {
         }
     }
 
-    // Set default devices
     if let Some(default_input) = host.default_input_device() {
         if let Ok(name) = default_input.name() {
             for (i, device_name) in devices.iter().enumerate() {

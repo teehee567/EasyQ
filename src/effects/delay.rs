@@ -3,14 +3,14 @@ use crate::config::CHANNELS;
 
 pub struct DelayEffect {
     enabled: bool,
-    pub delay_time_ms: f32,      // Delay time in milliseconds
+    pub delay_time_ms: f32,
     pub feedback: f32,           // 0.0 to 1.0, how much of the delayed signal is fed back
-    pub mix: f32,                // 0.0 to 1.0, dry/wet mix
-    buffer_left: Vec<f32>,       // Circular buffer for left channel
-    buffer_right: Vec<f32>,      // Circular buffer for right channel
-    buffer_size: usize,          // Size of buffer based on max delay time
-    write_pos: usize,            // Current write position in buffer
-    sample_rate: u32,            // Sample rate for calculating delay time
+    pub mix: f32,                // 0.0 to 1.0, drywet mix
+    buffer_left: Vec<f32>,
+    buffer_right: Vec<f32>,
+    buffer_size: usize,
+    write_pos: usize,
+    sample_rate: u32,
 }
 
 impl DelayEffect {
@@ -68,22 +68,17 @@ impl AudioEffect for DelayEffect {
             let in_left = buffer[base_idx];
             let in_right = if CHANNELS > 1 { buffer[base_idx + 1] } else { in_left };
             
-            // Calculate read position
             let read_pos = self.get_read_pos();
             
-            // Read delayed samples
             let delayed_left = self.buffer_left[read_pos];
             let delayed_right = self.buffer_right[read_pos];
             
-            // Calculate new samples with feedback
             let new_left = in_left + delayed_left * self.feedback;
             let new_right = in_right + delayed_right * self.feedback;
             
-            // Write to buffer
             self.buffer_left[self.write_pos] = new_left;
             self.buffer_right[self.write_pos] = new_right;
             
-            // Update write position
             self.write_pos = (self.write_pos + 1) % self.buffer_size;
             
             // Mix dry and wet signals

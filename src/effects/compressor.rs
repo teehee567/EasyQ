@@ -9,7 +9,6 @@ pub struct CompressorEffect {
     pub release: f32,        // 10.0 to 2000.0 ms, how quickly compression is released
     pub makeup_gain: f32,    // 0.0 to 24.0 dB, compensates for volume reduction
     
-    // State variables for envelope detection
     envelope_left: f32,
     envelope_right: f32,
 }
