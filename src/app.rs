@@ -212,15 +212,19 @@ impl SystemWideEQ {
 
 fn process_input_audio(data: &[f32], buffer: Arc<Mutex<Vec<f32>>>) {
     if let Ok(mut buffer) = buffer.lock() {
-        if CHANNELS == 3 {
-            for sample in data {
-                buffer.push(*sample);
-                buffer.push(*sample);
+        if CHANNELS == 2 {
+            for i in (0..data.len()).step_by(2) {
+                if i < data.len() {
+                    buffer.push(data[i]);
+                    buffer.push(data[i]);
+                }
             }
         } else {
             buffer.extend_from_slice(data);
         }
 
+
+        // Keep your buffer size management
         let buffer_size = BUFFER_SIZE * CHANNELS * 4;
         if buffer.len() > buffer_size {
             let excess = buffer.len() - buffer_size;
@@ -273,7 +277,24 @@ fn process_output_audio(
         Vec::new()
     };
 
-    // Process audio according to channel configuration
+
+// Print a message if the input buffer has any non-zero right channel samples
+if CHANNELS == 2 && !input_samples.is_empty() {
+    let mut right_channel_has_sound = false;
+    for i in (1..input_samples.len()).step_by(2) {
+        if input_samples[i].abs() > 0.01 {
+            right_channel_has_sound = true;
+            break;
+        }
+    }
+    
+    if right_channel_has_sound {
+        println!("Right channel input detected");
+    } else {
+        println!("No right channel input detected");
+    }
+}
+
     if CHANNELS == 2 {
         // Stereo processing
         let output_frames = data.len() / 2;
@@ -508,12 +529,11 @@ impl App for SystemWideEQ {
                     ui.heading("Equalizer");
 
                     // Spectrum Analyzer
-                    let (spectrum_data, spectrum_peak, sample_rate) = {
+                    let (spectrum_data, spectrum_peak) = {
                         let state = self.audio_state.lock().unwrap();
                         (
                             state.spectrum_data.clone(),
                             state.spectrum_peak.clone(),
-                            state.sample_rate,
                         )
                     };
                     draw_spectrum(ui, &spectrum_data, &spectrum_peak);
