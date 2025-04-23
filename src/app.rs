@@ -1,13 +1,18 @@
-use cpal::traits::{DeviceTrait, StreamTrait};
-use cpal::{Host, SampleFormat, Stream};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{Device, Host, SampleFormat, SampleRate, Stream};
 use eframe::{App, CreationContext, egui};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::vec::Vec;
 
 use crate::audio::devices::{
     create_stream_config, get_input_device, get_output_device, init_devices,
 };
 use crate::audio::{AudioState, SpectrumAnalyzer};
 use crate::config::{BANDS, BUFFER_SIZE, CHANNELS, SPECTRUM_DECAY, SPECTRUM_POINTS};
+use crate::effects::EffectsChain;
+use crate::effects::eqprocessor::EQProcessor;
 use crate::ui::{draw_effects_ui, draw_eq_sliders, draw_eq_visualization, draw_spectrum};
 
 #[derive(PartialEq)]
@@ -28,7 +33,6 @@ pub struct SystemWideEQ {
 
 impl SystemWideEQ {
     pub fn new(_cc: &CreationContext) -> Self {
-        // Initialize audio host
         let host = cpal::default_host();
         let audio_state = Arc::new(Mutex::new(AudioState::default()));
         let spectrum_analyzer = Arc::new(Mutex::new(SpectrumAnalyzer::new()));
@@ -48,7 +52,6 @@ impl SystemWideEQ {
         eq
     }
 
-    // Initialize audio devices
     fn init_devices(&mut self) {
         let (devices, input_device_index, output_device_index) = init_devices(&self.host);
 
@@ -67,10 +70,18 @@ impl SystemWideEQ {
         }
 
         let (input_device, output_device, sample_rate) = self.get_audio_devices()?;
+        let actual_sample_rate = sample_rate.0;
 
         {
             let mut state = self.audio_state.lock().unwrap();
-            state.sample_rate = sample_rate.0;
+            state.sample_rate = actual_sample_rate;
+            state
+                .eq_processor_left
+                .update_sample_rate(actual_sample_rate);
+            state
+                .eq_processor_right
+                .update_sample_rate(actual_sample_rate);
+            // state.effects_chain.update_sample_rate(actual_sample_rate);
         }
 
         let audio_buffer = self.setup_audio_buffer();
@@ -96,7 +107,7 @@ impl SystemWideEQ {
         Ok(())
     }
 
-    fn get_audio_devices(&self) -> Result<(cpal::Device, cpal::Device, cpal::SampleRate), String> {
+    fn get_audio_devices(&self) -> Result<(Device, Device, SampleRate), String> {
         let state = self.audio_state.lock().unwrap();
 
         let input_device_index = state.input_device_index;
@@ -105,14 +116,12 @@ impl SystemWideEQ {
 
         drop(state);
 
-        // Get selected devices
         let input_device = get_input_device(&self.host, &devices, input_device_index)
             .ok_or_else(|| "No input device selected".to_string())?;
 
         let output_device = get_output_device(&self.host, &devices, output_device_index)
             .ok_or_else(|| "No output device selected".to_string())?;
 
-        // Get default configs for devices
         let input_config = input_device
             .default_input_config()
             .map_err(|e| format!("Failed to get input config: {}", e))?;
@@ -122,6 +131,23 @@ impl SystemWideEQ {
         }
 
         let sample_rate = input_config.sample_rate();
+
+        let output_supported_configs = output_device
+            .supported_output_configs()
+            .map_err(|e| format!("Failed to get output supported configs: {}", e))?;
+
+        let supports_rate_and_format = output_supported_configs.into_iter().any(|conf| {
+            conf.sample_format() == SampleFormat::F32
+                && conf.min_sample_rate() <= sample_rate
+                && conf.max_sample_rate() >= sample_rate
+                && conf.channels() == CHANNELS as u16
+        });
+
+        if !supports_rate_and_format {
+            eprintln!(
+                "Warning: Output device might not directly support input sample rate/format/channels. Attempting anyway."
+            );
+        }
 
         Ok((input_device, output_device, sample_rate))
     }
@@ -135,15 +161,15 @@ impl SystemWideEQ {
 
     fn create_input_stream(
         &self,
-        input_device: &cpal::Device,
-        sample_rate: cpal::SampleRate,
+        input_device: &Device,
+        sample_rate: SampleRate,
         buffer: Arc<Mutex<Vec<f32>>>,
-    ) -> Result<cpal::Stream, String> {
+    ) -> Result<Stream, String> {
         let stream_config = create_stream_config(CHANNELS as u16, sample_rate);
 
         input_device
             .build_input_stream(
-                &stream_config,
+                &stream_config.into(),
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     process_input_audio(data, buffer.clone());
                 },
@@ -155,10 +181,10 @@ impl SystemWideEQ {
 
     fn create_output_stream(
         &self,
-        output_device: &cpal::Device,
-        sample_rate: cpal::SampleRate,
+        output_device: &Device,
+        sample_rate: SampleRate,
         buffer: Arc<Mutex<Vec<f32>>>,
-    ) -> Result<cpal::Stream, String> {
+    ) -> Result<Stream, String> {
         let audio_state_weak = Arc::downgrade(&self.audio_state);
         let spectrum_analyzer_weak = Arc::downgrade(&self.spectrum_analyzer);
         let stream_config = create_stream_config(CHANNELS as u16, sample_rate);
@@ -168,12 +194,15 @@ impl SystemWideEQ {
             .map_err(|e| format!("Failed to get output config: {}", e))?;
 
         if output_config.sample_format() != SampleFormat::F32 {
-            return Err("Output device doesn't support F32 format".to_string());
+            return Err(format!(
+                "Output device default config is not F32, but {:?}. Check device support.",
+                output_config.sample_format()
+            ));
         }
 
         output_device
             .build_output_stream(
-                &stream_config,
+                &stream_config.into(),
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     process_output_audio(
                         data,
@@ -192,7 +221,6 @@ impl SystemWideEQ {
     pub fn stop_processing(&mut self) {
         self.input_stream = None;
         self.output_stream = None;
-
         self.audio_buffer = None;
 
         let mut state = self.audio_state.lock().unwrap();
@@ -201,33 +229,22 @@ impl SystemWideEQ {
 
     pub fn load_preset(&mut self, preset_name: &str) {
         let mut state = self.audio_state.lock().unwrap();
-        let eq_gains = state.eq_gains;
-
-        if let Some(preset) = state.presets.get(preset_name) {
-            state.eq_gains = *preset;
-            state.eq_processor.update_gains(eq_gains);
+        if let Some(preset_gains) = state.presets.get(preset_name).cloned() {
+            state.eq_gains = preset_gains;
+            state.eq_processor_left.update_gains(preset_gains);
+            state.eq_processor_right.update_gains(preset_gains);
         }
     }
 }
 
 fn process_input_audio(data: &[f32], buffer: Arc<Mutex<Vec<f32>>>) {
-    if let Ok(mut buffer) = buffer.lock() {
-        if CHANNELS == 2 {
-            for i in (0..data.len()).step_by(2) {
-                if i < data.len() {
-                    buffer.push(data[i]);
-                    buffer.push(data[i]);
-                }
-            }
-        } else {
-            buffer.extend_from_slice(data);
-        }
+    if let Ok(mut buffer_lock) = buffer.lock() {
+        buffer_lock.extend_from_slice(data);
 
-
-        let buffer_size = BUFFER_SIZE * CHANNELS * 4;
-        if buffer.len() > buffer_size {
-            let excess = buffer.len() - buffer_size;
-            buffer.drain(0..excess);
+        let max_buffer_len = BUFFER_SIZE * CHANNELS * 10;
+        if buffer_lock.len() > max_buffer_len {
+            let excess = buffer_lock.len() - max_buffer_len;
+            buffer_lock.drain(0..excess);
         }
     }
 }
@@ -236,8 +253,9 @@ fn update_spectrum_data(analyzer: &mut SpectrumAnalyzer, state: &mut AudioState)
     let sample_rate = state.sample_rate;
     let spectrum = analyzer.process_fft(sample_rate);
 
-    // Apply temporal smoothing
-    for i in 0..SPECTRUM_POINTS {
+    let len_to_process = SPECTRUM_POINTS.min(spectrum.len());
+
+    for i in 0..len_to_process {
         state.spectrum_data[i] =
             state.spectrum_data[i] * SPECTRUM_DECAY + spectrum[i] * (1.0 - SPECTRUM_DECAY);
 
@@ -247,6 +265,10 @@ fn update_spectrum_data(analyzer: &mut SpectrumAnalyzer, state: &mut AudioState)
             state.spectrum_peak[i] *= 0.98;
         }
     }
+    for i in len_to_process..SPECTRUM_POINTS {
+        state.spectrum_data[i] = state.spectrum_data[i] * SPECTRUM_DECAY;
+        state.spectrum_peak[i] *= 0.98;
+    }
 }
 
 fn process_output_audio(
@@ -254,93 +276,70 @@ fn process_output_audio(
     buffer: Arc<Mutex<Vec<f32>>>,
     audio_state_weak: Weak<Mutex<AudioState>>,
     spectrum_analyzer_weak: Weak<Mutex<SpectrumAnalyzer>>,
-    sample_rate: u32,
+    _sample_rate: u32,
 ) {
-    // Update EQ processor
-    if let Some(state) = audio_state_weak.upgrade() {
-        if let Ok(mut state) = state.lock() {
-            let eq_gains = state.eq_gains;
-            state.eq_processor.update_sample_rate(sample_rate);
-            state.eq_processor.update_gains(eq_gains);
+    let samples_needed = data.len();
+    let mut input_samples = Vec::with_capacity(samples_needed);
+
+    if let Ok(mut buffer_lock) = buffer.lock() {
+        let available = buffer_lock.len();
+        let samples_to_take = available.min(samples_needed);
+
+        if samples_to_take > 0 {
+            input_samples.extend_from_slice(&buffer_lock[0..samples_to_take]);
+            buffer_lock.drain(0..samples_to_take);
         }
-    }
-
-    let input_samples = if let Ok(mut buffer_lock) = buffer.lock() {
-        let mut samples = Vec::new();
-        std::mem::swap(&mut samples, &mut buffer_lock);
-        samples
-    } else {
-        Vec::new()
-    };
-
-    if CHANNELS == 2 {
-        let output_frames = data.len() / 2;
-        
-        for frame in 0..output_frames {
-            let left_out_idx = frame * 2;
-            let right_out_idx = frame * 2 + 1;
-            
-            let (left_in, right_in) = if frame * 2 + 1 < input_samples.len() {
-                (input_samples[frame * 2], input_samples[frame * 2 + 1])
-            } else {
-                (0.0, 0.0)
-            };
-            
-            let left_processed = apply_eq_processing(left_in, &audio_state_weak);
-            let right_processed = apply_eq_processing(right_in, &audio_state_weak);
-            
-            if left_out_idx < data.len() {
-                data[left_out_idx] = left_processed;
-            }
-            
-            if right_out_idx < data.len() {
-                data[right_out_idx] = right_processed;
-            }
+        if samples_to_take < samples_needed {
+            input_samples.resize(samples_needed, 0.0);
         }
     } else {
-        let output_frames = data.len();
-        for i in 0..output_frames {
-            let in_sample = if i < input_samples.len() { input_samples[i] } else { 0.0 };
-            let processed = apply_eq_processing(in_sample, &audio_state_weak);
-            data[i] = processed;
-        }
+        input_samples.resize(samples_needed, 0.0);
     }
 
-    // Apply effects chain
-    apply_effects_chain(data, sample_rate, audio_state_weak.clone());
+    if let Some(state_arc) = audio_state_weak.upgrade() {
+        if let Ok(mut state) = state_arc.lock() {
+            let num_frames = samples_needed / CHANNELS;
+            for i in 0..num_frames {
+                let in_l_idx = i * CHANNELS;
+                let out_l_idx = i * CHANNELS;
 
-    // Spectrum analysis
-    if let Some(analyzer) = spectrum_analyzer_weak.upgrade() {
-        if let Ok(mut analyzer) = analyzer.lock() {
+                let processed_l = state
+                    .eq_processor_left
+                    .process_sample(input_samples[in_l_idx]);
+                data[out_l_idx] = processed_l;
+
+                if CHANNELS == 2 {
+                    let in_r_idx = i * CHANNELS + 1;
+                    let out_r_idx = i * CHANNELS + 1;
+
+                    let processed_r = state
+                        .eq_processor_right
+                        .process_sample(input_samples[in_r_idx]);
+                    data[out_r_idx] = processed_r;
+                }
+            }
+        } else {
+            data.copy_from_slice(&input_samples);
+        }
+    } else {
+        data.copy_from_slice(&input_samples);
+    }
+
+    // if let Some(state_arc) = audio_state_weak.upgrade() {
+    //     if let Ok(mut state) = state_arc.lock() {
+    //         state.effects_chain.process(data, state.sample_rate);
+    //     }
+    // }
+
+    if let Some(analyzer_arc) = spectrum_analyzer_weak.upgrade() {
+        if let Ok(mut analyzer) = analyzer_arc.lock() {
             if analyzer.add_samples(data) {
-                if let Some(state) = audio_state_weak.upgrade() {
-                    if let Ok(mut state) = state.lock() {
+                if let Some(state_arc) = audio_state_weak.upgrade() {
+                    if let Ok(mut state) = state_arc.lock() {
                         update_spectrum_data(&mut analyzer, &mut state);
                     }
                 }
             }
-        }
-    }
-}
-
-fn apply_eq_processing(sample: f32, audio_state_weak: &Weak<Mutex<AudioState>>) -> f32 {
-    if let Some(state) = audio_state_weak.upgrade() {
-        if let Ok(mut state) = state.lock() {
-            return state.eq_processor.process(sample);
-        }
-    }
-
-    sample
-}
-
-fn apply_effects_chain(
-    data: &mut [f32],
-    sample_rate: u32,
-    audio_state_weak: Weak<Mutex<AudioState>>,
-) {
-    if let Some(state) = audio_state_weak.upgrade() {
-        if let Ok(mut state) = state.lock() {
-            state.effects_chain.process(data, sample_rate);
         }
     }
 }
@@ -356,12 +355,12 @@ impl App for SystemWideEQ {
             ctx.request_repaint();
         }
 
-        // controls
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Exit").clicked() {
-                        std::process::exit(0);
+                        self.stop_processing();
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
 
@@ -374,6 +373,7 @@ impl App for SystemWideEQ {
                     for preset_name in preset_names {
                         if ui.button(&preset_name).clicked() {
                             self.load_preset(&preset_name);
+                            ui.close_menu();
                         }
                     }
                 });
@@ -397,14 +397,23 @@ impl App for SystemWideEQ {
 
                 if ui.button("Reset EQ").clicked() {
                     let mut state = self.audio_state.lock().unwrap();
-                    state.eq_gains = [0.0; BANDS];
+                    let zero_gains = [0.0; BANDS];
+                    state.eq_gains = zero_gains;
+                    state.eq_processor_left.update_gains(zero_gains);
+                    state.eq_processor_right.update_gains(zero_gains);
                 }
 
-                ui.label(if running {
+                let status_text = if running {
                     "Status: Running"
                 } else {
                     "Status: Stopped"
-                });
+                };
+                let status_color = if running {
+                    egui::Color32::GREEN
+                } else {
+                    egui::Color32::RED
+                };
+                ui.label(egui::RichText::new(status_text).color(status_color));
 
                 ui.separator();
                 ui.selectable_value(&mut self.current_tab, Tab::Equalizer, "Equalizer");
@@ -412,11 +421,11 @@ impl App for SystemWideEQ {
             });
         });
 
-        // device selection
         egui::SidePanel::right("devices_panel").show(ctx, |ui| {
             ui.heading("Audio Devices");
+            ui.separator();
 
-            let (devices, input_idx, output_idx) = {
+            let (devices, mut input_idx, mut output_idx) = {
                 let state = self.audio_state.lock().unwrap();
                 (
                     state.devices.clone(),
@@ -425,121 +434,130 @@ impl App for SystemWideEQ {
                 )
             };
 
-            let mut new_input_idx = input_idx;
-            let mut new_output_idx = output_idx;
-            let mut device_changed = false;
+            let mut current_input_idx = input_idx;
+            let mut current_output_idx = output_idx;
+            let mut input_changed = false;
+            let mut output_changed = false;
 
             egui::ComboBox::from_label("Input Device")
                 .selected_text(
                     devices
-                        .get(input_idx)
+                        .get(current_input_idx)
                         .map(|s| s.trim_start_matches("Input: "))
-                        .unwrap_or("None"),
+                        .unwrap_or("None Selected"),
                 )
                 .show_ui(ui, |ui| {
                     for (i, device_name) in devices.iter().enumerate() {
                         if device_name.starts_with("Input:") {
+                            let text = device_name.trim_start_matches("Input: ");
                             if ui
-                                .selectable_value(
-                                    &mut new_input_idx,
-                                    i,
-                                    device_name.trim_start_matches("Input: "),
-                                )
-                                .clicked()
+                                .selectable_value(&mut current_input_idx, i, text)
+                                .changed()
                             {
-                                device_changed = true;
+                                input_changed = true;
                             }
                         }
                     }
                 });
+
+            if input_changed {
+                input_idx = current_input_idx;
+            }
 
             egui::ComboBox::from_label("Output Device")
                 .selected_text(
                     devices
-                        .get(output_idx)
+                        .get(current_output_idx)
                         .map(|s| s.trim_start_matches("Output: "))
-                        .unwrap_or("None"),
+                        .unwrap_or("None Selected"),
                 )
                 .show_ui(ui, |ui| {
                     for (i, device_name) in devices.iter().enumerate() {
                         if device_name.starts_with("Output:") {
+                            let text = device_name.trim_start_matches("Output: ");
                             if ui
-                                .selectable_value(
-                                    &mut new_output_idx,
-                                    i,
-                                    device_name.trim_start_matches("Output: "),
-                                )
-                                .clicked()
+                                .selectable_value(&mut current_output_idx, i, text)
+                                .changed()
                             {
-                                device_changed = true;
+                                output_changed = true;
                             }
                         }
                     }
                 });
 
-            if device_changed {
+            if output_changed {
+                output_idx = current_output_idx;
+            }
+
+            if input_changed || output_changed {
                 let mut state = self.audio_state.lock().unwrap();
-                state.input_device_index = new_input_idx;
-                state.output_device_index = new_output_idx;
+                state.input_device_index = input_idx;
+                state.output_device_index = output_idx;
             }
 
             if ui.button("Apply Device Settings").clicked() {
-                if running {
+                let was_running = running;
+                if was_running {
                     self.stop_processing();
-                    if let Err(e) = self.start_processing() {
-                        eprintln!("Failed to restart processing: {}", e);
-                    }
                 }
+                if let Err(e) = self.start_processing() {
+                    eprintln!(
+                        "Failed to start/restart processing after device change: {}",
+                        e
+                    );
+                }
+            }
+
+            if ui.button("Refresh Device List").clicked() {
+                let (new_devices, new_input_idx, new_output_idx) = init_devices(&self.host);
+                let mut state = self.audio_state.lock().unwrap();
+                state.devices = new_devices;
+                state.input_device_index = new_input_idx.min(state.devices.len().saturating_sub(1));
+                state.output_device_index =
+                    new_output_idx.min(state.devices.len().saturating_sub(1));
             }
         });
 
-        // main eq area
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.current_tab {
-                Tab::Equalizer => {
-                    ui.heading("Equalizer");
+        egui::CentralPanel::default().show(ctx, |ui| match self.current_tab {
+            Tab::Equalizer => {
+                ui.heading("Equalizer");
+                ui.separator();
 
-                    // Spectrum Analyzer
-                    let (spectrum_data, spectrum_peak) = {
-                        let state = self.audio_state.lock().unwrap();
-                        (
-                            state.spectrum_data.clone(),
-                            state.spectrum_peak.clone(),
-                        )
-                    };
-                    draw_spectrum(ui, &spectrum_data, &spectrum_peak);
+                let (spectrum_data, spectrum_peak) = {
+                    let state = self.audio_state.lock().unwrap();
+                    (state.spectrum_data, state.spectrum_peak)
+                };
+                draw_spectrum(ui, &spectrum_data, &spectrum_peak);
 
-                    // Eq visualization
-                    let eq_gains = {
-                        let state = self.audio_state.lock().unwrap();
-                        state.eq_gains
-                    };
-                    draw_eq_visualization(ui, &eq_gains);
+                let mut current_eq_gains = {
+                    let state = self.audio_state.lock().unwrap();
+                    state.eq_gains
+                };
+                draw_eq_visualization(ui, &current_eq_gains);
 
-                    // Eq Slider
-                    let mut eq_gains = {
-                        let state = self.audio_state.lock().unwrap();
-                        state.eq_gains
-                    };
+                ui.separator();
 
-                    if draw_eq_sliders(ui, &mut eq_gains) {
+                if draw_eq_sliders(ui, &mut current_eq_gains) {
+                    let mut state = self.audio_state.lock().unwrap();
+                    state.eq_gains = current_eq_gains;
+                    let gains = state.eq_gains;
+                    state.eq_processor_left.update_gains(gains);
+                    state.eq_processor_right.update_gains(gains);
+                }
+            }
+            Tab::Effects => {
+                ui.heading("Audio Effects");
+                ui.separator();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let mut state = self.audio_state.lock().unwrap();
+                    draw_effects_ui(ui, &mut state.effects_chain);
+
+                    ui.separator();
+                    if ui.button("Reset All Effects").clicked() {
                         let mut state = self.audio_state.lock().unwrap();
-                        state.eq_gains = eq_gains;
+                        state.effects_chain = EffectsChain::new(state.sample_rate);
                     }
-                }
-                Tab::Effects => {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        let mut state = self.audio_state.lock().unwrap();
-
-                        draw_effects_ui(ui, &mut state.effects_chain);
-
-                        if ui.button("Reset All Effects").clicked() {
-                            let mut state = self.audio_state.lock().unwrap();
-                            state.effects_chain =
-                                crate::effects::EffectsChain::new(state.sample_rate);
-                        }
-                    });
-                }
+                });
             }
         });
     }
