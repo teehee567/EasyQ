@@ -20,6 +20,7 @@ Table of Contents
 ### Overview
 
 This project is a system-wide audio equalizer and effects processor that utilizes various audio processing algorithms to enhance and modify audio signals in real-time.
+<img width="905" alt="easyq" src="https://github.com/user-attachments/assets/2cd9e077-441a-46b6-b246-79f13696757b" />
 
 ### Audio Processing Algorithms
 
